@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+data/gate_pos2.csv
+data/gate_pos3.csv
