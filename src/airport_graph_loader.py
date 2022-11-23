@@ -3,8 +3,6 @@ from itertools import product
 import networkx as nx
 import pandas as pd
 import numpy as np
-
-from .utils import *
         
 
 '''API: load_dense and load_sparse'''
