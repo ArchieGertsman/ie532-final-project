@@ -1,5 +1,6 @@
 import networkx as nx
 import numpy as np
+from itertools import product
 
 
 '''API: generate_flight_schedule_graph'''
@@ -8,9 +9,9 @@ def generate_flight_schedule_graph(
     G_airport, 
     n_inbound, 
     n_outbound, 
-    n_connecting, 
     pace=54.4804182335, 
-    mean_connecting_wait_time=.5
+    mean_connecting_wait_time=.5,
+    geom_p=.9
 ):
     '''generates a graph where nodes are flights and edges
     represent flight connections. Node attributes include
@@ -31,21 +32,26 @@ def generate_flight_schedule_graph(
         n_outbound, 
         lambda i: f'out_{i+1}')
 
-    in_connecting, out_connecting = _generate_connections(
+    _generate_forward_connections(
         G_schedule, 
         G_airport, 
-        n_connecting, 
+        inbound_flights, 
+        outbound_flights, 
+        pace,
+        geom_p)
+
+    _adjust_flight_times(
+        G_schedule, 
+        mean_connecting_wait_time)
+
+    _generate_backward_connections(
+        G_airport, 
+        G_schedule, 
         inbound_flights, 
         outbound_flights, 
         pace)
 
-    _adjust_flight_times(
-        G_schedule, 
-        in_connecting, 
-        out_connecting, 
-        mean_connecting_wait_time)
-
-    return G_schedule, inbound_flights
+    return G_schedule, inbound_flights, outbound_flights
 
 
 
@@ -77,37 +83,43 @@ def _generate_flights(
     return flight_names
 
 
-def _generate_connections(
+
+def _generate_forward_connections(
     G_schedule, 
     G_airport, 
-    n_connecting, 
     inbound_flights, 
     outbound_flights, 
-    pace
+    pace,
+    geom_p
 ):
     '''randomly matches `n_connecting` pairs of inbound and outbound flights,
     adding an edge with attribute `t_escort`, the time to escort from the
     inbound gate to the outbound gate
     '''
-    assert n_connecting <= min(len(inbound_flights), len(outbound_flights))
-
-    in_connecting = np.random.choice(inbound_flights, n_connecting, replace=False)
-    out_connecting = np.random.choice(outbound_flights, n_connecting, replace=False)
-
-    for in_flight, out_flight in zip(in_connecting, out_connecting):
+    for in_flight, out_flight in product(inbound_flights, outbound_flights):
         in_gate = G_schedule.nodes[in_flight]['gate']
         out_gate = G_schedule.nodes[out_flight]['gate']
+        if in_gate == out_gate:
+            continue
+
+        wheelchair_demand = np.random.geometric(geom_p) - 1
+        if wheelchair_demand == 0:
+            continue
+
         dist = nx.shortest_path_length(G_airport, in_gate, out_gate, weight='weight')
         t_escort = dist / pace
-        G_schedule.add_edge(in_flight, out_flight, t_escort=t_escort)
 
-    return in_connecting, out_connecting
+        G_schedule.add_edge(
+            in_flight, 
+            out_flight, 
+            capacity=wheelchair_demand, 
+            weight=-1, 
+            t_escort=t_escort)
+
 
 
 def _adjust_flight_times(
     G_schedule, 
-    in_connecting, 
-    out_connecting, 
     mean_connecting_wait_time
 ):
     '''for each outbound flight that is part of a connection, 
@@ -123,11 +135,13 @@ def _adjust_flight_times(
     it more realistic. If `t_arrival` and `t_departure` are then
     both shifted to fit within the 0-24 hour range.
     '''
-    for in_flight, out_flight in zip(in_connecting, out_connecting):
+    for in_flight, out_flight in G_schedule.edges:
         t_arrival = G_schedule.nodes[in_flight]['t']
+        t_departure = G_schedule.nodes[out_flight]['t']
         t_escort = G_schedule[in_flight][out_flight]['t_escort']
 
-        t_departure = t_arrival + t_escort + np.random.exponential(mean_connecting_wait_time)
+        t_departure_new = t_arrival + t_escort + np.random.exponential(mean_connecting_wait_time)
+        t_departure = max(t_departure, t_departure_new)
 
         if t_departure >= 24:
             # shift flight times to fit in 0-24 time
@@ -137,3 +151,25 @@ def _adjust_flight_times(
 
         G_schedule.nodes[in_flight]['t'] = t_arrival
         G_schedule.nodes[out_flight]['t'] = t_departure
+
+
+
+def _generate_backward_connections(
+    G_airport, 
+    G_schedule, 
+    inbound_flights, 
+    outbound_flights, 
+    pace
+):
+    for in_flight, out_flight in product(inbound_flights, outbound_flights):
+        t_arrival = G_schedule.nodes[in_flight]['t']
+        in_gate = G_schedule.nodes[in_flight]['gate']
+
+        t_departure = G_schedule.nodes[out_flight]['t']
+        out_gate = G_schedule.nodes[out_flight]['gate']
+
+        dist = nx.shortest_path_length(G_airport, out_gate, in_gate, weight='weight')
+        t_escort = dist / pace
+
+        if t_arrival > t_departure + t_escort:
+            G_schedule.add_edge(out_flight, in_flight, weight=-1)
